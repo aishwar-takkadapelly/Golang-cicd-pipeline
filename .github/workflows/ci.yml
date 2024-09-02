@@ -1,0 +1,94 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: '1.23.0'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Build Go application
+      run: |
+        go build -o main .
+
+    - name: Run tests
+      run: |
+        go test ./...
+
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/golang:latest .
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWD }}
+
+    - name: Tag and push Docker image
+      run: |
+        docker push ${{ secrets.DOCKER_USERNAME }}/golang:latest
+  
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build  # Make sure deploy only runs after build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            # Ensure Docker is installed
+            if ! command -v docker &> /dev/null; then
+              echo "Docker not found, installing..."
+              sudo yum update -y
+              sudo yum install -y docker
+              sudo systemctl start docker
+              sudo systemctl enable docker
+              sudo usermod -aG docker ${{ secrets.EC2_USER }}
+            fi
+
+            # Pull Docker image and run container
+            echo "Pulling Docker image..."
+            sudo docker pull ${{ secrets.DOCKER_USERNAME }}/golang:latest
+    
+            # Stop and remove any running container with the same name
+            if [ "$(sudo docker ps -a -q -f name=my-app)" ]; then
+              echo "Stopping and removing existing container..."
+              sudo docker stop my-app || true
+              sudo docker rm my-app || true
+            fi
+ 
+            # Run new container
+            echo "Running new container..."
+            sudo docker run -d -p 8083:8083 --name my-app ${{ secrets.DOCKER_USERNAME }}/golang:latest
